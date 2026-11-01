@@ -141,6 +141,62 @@ pid 12345 仍在运行 —— 任务可能只是慢，不是卡死
 
 **为什么每秒才上报一次 progress？** 用 `context.progress` 上报太频繁会刷屏，但完全不报又退化成黑屏体验。1 秒是不会干扰阅读的上限。
 
+## 与其它 OpenCode 插件的区别
+
+`wait_for` 只做一件事：**等待**。它不负责启动进程，也不接管内置工具。启动靠 `shell` 的 `background: true`，等待靠 `wait_for`。
+
+下面是最容易混淆的几个项目（2026-11 数据）：
+
+| 项目 | ★ | 定位 | 和本插件的关系 |
+| --- | --- | --- | --- |
+| **shekohex/opencode-pty** | 607 | 交互式 PTY 管理（spawn/write/read/kill） | 功能重叠但目标不同，见下表 |
+| A8Cl233395/opencode-background-jobs | 1 | 替换内置 `shell`，超时自动转后台任务 | 思路最接近，但接管了 `shell` 工具 |
+| zeigarnick/opencode-background-task | 3 | 后台跑 **agent 任务** | 无关，管的是 subagent 不是进程 |
+| PrismKitty/opencode-background-tasks | 1 | 侧边栏展示运行中的 shell / subagent | 无关，只是 UI 展示 |
+
+### vs opencode-pty
+
+它是目前最成熟的同类方案，但解决的是**另一个层面**的问题：
+
+| 维度 | opencode-wait-for-v2 | opencode-pty |
+| --- | --- | --- |
+| 核心范式 | 阻塞等待条件成立 | 后台运行 + 按需读取 |
+| 工具数量 | 1（`wait_for`） | 5（`pty_spawn` / `pty_write` / `pty_read` / `pty_list` / `pty_kill`） |
+| 启动进程 | ❌ 交给内置 `shell` | ✅ 原生 `pty_spawn` |
+| 向进程输入 | ❌ | ✅ 支持 Ctrl+C、方向键 |
+| 等结束的写法 | `wait_for(path, pattern)` 一次调用 | `pty_spawn(notifyOnExit: true)` 等通知 |
+| 超时行为 | 正常返回 + 进程状态 + 日志尾部 | `timeoutSeconds` 到点**杀掉进程** |
+| 中断（ESC） | ✅ `AbortSignal` | 取决于 SDK |
+| 进度上报 | ✅ `context.progress` | ❌ |
+| 大日志 | 只读尾部 64KB，11MB 命中 3ms | 全量进 ring buffer（5 万行上限） |
+| 常驻内存 | 几乎为零（无缓冲） | 每会话维持 5 万行缓冲 |
+| 依赖 | 零依赖（Node 内置 `fs`） | `bun-pty` 原生模块 |
+| 附带组件 | 无 | Web UI + TUI 侧边栏 + REST API + WebSocket |
+| 权限限制 | 无 | ⚠️ `ask` 规则会被当作 `deny` |
+| 代码量 | 12.5KB 单文件 | 完整前后端项目 |
+
+**怎么选：**
+
+| 需求 | 推荐 |
+| --- | --- |
+| `mvnd install` 等构建跑完 | **wait_for** |
+| 起服务后等端口就绪 | **wait_for** |
+| `npm run dev` 起 dev server 并保持存活 | opencode-pty |
+| 交互式 REPL / 数据库 CLI | opencode-pty |
+| 让 agent 中途给进程发 Ctrl+C | opencode-pty |
+
+两者**可以同时安装**，不冲突：dev server 交给 pty，构建交给 wait_for。
+
+### vs opencode-background-jobs
+
+思路上它是离本插件最近的——都认同「不该让对话阻塞在长命令上」。区别在于：
+
+- 它**替换了内置 `shell` 工具**（`timeout: 0` 直接转后台，超时不杀进程而是转 job），侵入性更高
+- 需要 `job_list` / `job_read` / `job_kill` 三个工具配合，调用链更长
+- `wait_for` 不改动任何内置工具，只**新增**一个工具，随时可以移除
+
+如果你已经在用它的 `job_read({ timeout })` 阻塞等待，那和 `wait_for` 的能力是重叠的，选一个即可。
+
 ## 兼容性
 
 在 OpenCode **v2.2.5** 上开发和验证。依赖 `@opencode/plugin` 的 `ctx.tool.transform` 与 `ctx.tool` 的 `execute(input, context)` 约定，其中 `context.signal` 用于中断、`context.progress` 用于进度上报。
