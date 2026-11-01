@@ -1,0 +1,44 @@
+{
+  "name": "opencode-wait-for-v2",
+  "version": "0.1.0",
+  "description": "OpenCode V2 plugin: a wait_for tool that blocks until a log line appears or a process exits, replacing `sleep N; tail ...` polling",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bun test",
+    "check": "bun build index.ts --target=node --outfile=/tmp/wait-for-check.js",
+    "release": "./scripts/release.sh"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "dependencies": {
+    "@opencode/plugin": "latest"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "opencode-v2",
+    "wait",
+    "sleep",
+    "polling",
+    "long-running",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lcssos/opencode-wait-for-v2.git"
+  },
+  "homepage": "https://github.com/lcssos/opencode-wait-for-v2#readme",
+  "bugs": {
+    "url": "https://github.com/lcssos/opencode-wait-for-v2/issues"
+  }
+}
