@@ -1,6 +1,6 @@
 {
   "name": "opencode-wait-for-v2",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenCode V2 plugin: a wait_for tool that blocks until a log line appears or a process exits, replacing `sleep N; tail ...` polling",
   "type": "module",
   "exports": {
