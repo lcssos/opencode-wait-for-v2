@@ -19,14 +19,14 @@ jobs:
         with:
           bun-version: latest
 
-      - name: 单元测试
+      - name: Unit tests
         run: bun test
 
-      - name: 打包校验（确认入口可被 bundler 解析）
+      - name: Build check (entry resolves through the bundler)
         run: |
           bun build index.ts --target=node --outfile=/tmp/check.js
-          echo "构建通过，产物大小：$(wc -c </tmp/check.js) 字节"
+          echo "Build passed; artifact size: $(wc -c </tmp/check.js) bytes"
 
-      - name: 确认必需文件都在发布清单里
+      - name: Confirm required files are in the publish manifest
         run: |
           bun pm pack --dry-run 2>/dev/null || npm pack --dry-run
