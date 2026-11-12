@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# 发布新版本：改版本号 → 提交 → 打 tag → 推送。
-# 推送 tag 后会触发 GitHub Actions（.github/workflows/publish.yml）自动发布到 npm，
-# CI 用 OIDC trusted publishing 认证，不需要任何 npm token。
+# Release a new version: bump the version -> commit -> tag -> push.
+# Pushing the tag triggers GitHub Actions (.github/workflows/publish.yml) to
+# publish to npm. CI uses OIDC trusted publishing, so no npm token is needed.
 #
-# 用法：
-#   ./scripts/release.sh patch    # 0.1.0 → 0.1.1
-#   ./scripts/release.sh minor    # 0.1.1 → 0.2.0
-#   ./scripts/release.sh major    # 0.2.0 → 1.0.0
-#   ./scripts/release.sh 1.2.3    # 指定版本号
+# Usage:
+#   ./scripts/release.sh patch    # 0.1.0 -> 0.1.1
+#   ./scripts/release.sh minor    # 0.1.1 -> 0.2.0
+#   ./scripts/release.sh major    # 0.2.0 -> 1.0.0
+#   ./scripts/release.sh 1.2.3    # explicit version
 #
 set -euo pipefail
 
@@ -16,35 +16,35 @@ cd "$(dirname "$0")/.."
 
 BUMP="${1:-}"
 if [ -z "$BUMP" ]; then
-  echo "用法: $0 <patch|minor|major|X.Y.Z>" >&2
+  echo "Usage: $0 <patch|minor|major|X.Y.Z>" >&2
   exit 1
 fi
 
-# 工作区必须干净，避免把无关改动混进发布提交
+# The working tree must be clean so unrelated changes do not enter the release commit.
 if [ -n "$(git status --porcelain)" ]; then
-  echo "工作区有未提交的改动，请先提交或 stash：" >&2
+  echo "The working tree has uncommitted changes; commit or stash them first:" >&2
   git status --short >&2
   exit 1
 fi
 
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 if [ "$CURRENT_BRANCH" != "main" ]; then
-  echo "当前分支是 $CURRENT_BRANCH，请在 main 上发布" >&2
+  echo "Current branch is $CURRENT_BRANCH; release from main" >&2
   exit 1
 fi
 
-# 发版前必须绿
-echo "运行测试..."
+# Tests must pass before a release.
+echo "Running tests..."
 bun test
 
-# 不在 tag 上改版本号，交给 npm 计算
+# Do not create the tag yet; npm computes the version bump.
 case "$BUMP" in
   patch|minor|major)
     npm version "$BUMP" --no-git-tag-version >/dev/null
     ;;
   *)
     if ! printf '%s' "$BUMP" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-      echo "版本号必须是 X.Y.Z 形式，收到: $BUMP" >&2
+      echo "Version must be X.Y.Z; got: $BUMP" >&2
       exit 1
     fi
     npm version "$BUMP" --no-git-tag-version >/dev/null
@@ -54,17 +54,17 @@ esac
 VERSION=$(node -p "require('./package.json').version")
 TAG="v$VERSION"
 
-echo "准备发布 $VERSION (tag: $TAG)"
+echo "Preparing release $VERSION (tag: $TAG)"
 
 git add package.json
 git -c core.hooksPath=/dev/null commit -m "chore: release $TAG"
 git tag -a "$TAG" -m "release $TAG"
 
-echo "推送到 origin..."
+echo "Pushing to origin..."
 git push origin "$CURRENT_BRANCH"
 git push origin "$TAG"
 
 echo
-echo "已推送 $TAG，GitHub Actions 正在发布到 npm。"
-echo "查看进度: gh run watch \$(gh run list --limit 1 --json databaseId -q '.[0].databaseId')"
-echo "包地址:   https://www.npmjs.com/package/opencode-wait-for-v2"
+echo "Pushed $TAG; GitHub Actions is publishing to npm."
+echo "Watch progress: gh run watch \$(gh run list --limit 1 --json databaseId -q '.[0].databaseId')"
+echo "Package:       https://www.npmjs.com/package/opencode-wait-for-v2"

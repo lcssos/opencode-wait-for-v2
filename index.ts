@@ -1,29 +1,33 @@
 import { open, stat } from "node:fs/promises"
 
 /**
- * opencode-wait-for-v2 —— 给 OpenCode V2 补一个「等新输出」的原语。
+ * opencode-wait-for-v2 - a "wait for new output" primitive for OpenCode V2.
  *
- * 问题
- * ----
- * OpenCode 内置的 shell 工具是「跑完才返回」：长任务执行期间整轮对话阻塞，
- * UI 没有任何进度，结束后模型还要再推理一轮（本机实测这一轮 P50 约 14 秒）。
+ * Problem
+ * -------
+ * OpenCode's built-in shell tool returns only when the command finishes: the
+ * whole conversation blocks during a long task, the UI shows no progress, and
+ * the model spends another reasoning turn after it ends (P50 ~14s locally).
  *
- * 更麻烦的是它没有「等日志刷出某一行」的能力。模型于是只能自己拼：
+ * It also has no "wait for a new log line" capability, so the model has to
+ * build polling loops by hand:
  *
  *     sleep 60; tail -c 800 build.log | tail -12; ps -Ao pid,command | grep ...
  *
- * 一条长任务往往要轮询十几次，每次都是「白等 N 秒 + 重新推理一轮」。
+ * A long task often needs a dozen polls, each waiting a guessed number of
+ * seconds and then reasoning again.
  *
- * 做法
- * ----
- * 把「等」收进一次工具调用：
- *   - 命令在内部轮询，对话只占一次
- *   - 条件成立立刻返回，不傻等到 timeout
- *   - 超时不抛错，返回里带进程状态和日志尾部，让模型能判断是「慢」还是「卡死」
- *   - 支持 AbortSignal，用户按 ESC 中断会话立刻停
+ * Approach
+ * --------
+ * Put the wait into one tool call:
+ *   - the command polls internally; the conversation uses one call
+ *   - return as soon as the condition holds, not at the timeout
+ *   - timeouts do not throw; return process state and the log tail so the
+ *     model can tell "slow" from "stuck"
+ *   - support AbortSignal so ESC stops the wait immediately
  *
- * 这是对标 Codex CLI 的 `write_stdin` / `clock.sleep` 的设计：
- * 那边同样是「一次调用阻塞等待 + 可中断 + 返回已产出输出」。
+ * This mirrors Codex CLI's `write_stdin` / `clock.sleep` design:
+ * one blocking call, interruptible, returning output produced so far.
  */
 
 const DEFAULT_TIMEOUT_MS = 240_000
@@ -31,13 +35,13 @@ const MAX_TIMEOUT_MS = 600_000
 const DEFAULT_POLL_MS = 500
 const MIN_POLL_MS = 100
 
-/** 只监视文件尾部这么多字节，避免把几十 MB 的构建日志读进内存。 */
+/** Watch only this many bytes of the file tail; avoids loading tens of MB of build logs. */
 const TAIL_BYTES = 64 * 1024
 
-/** 返回给模型的日志上限，超长时保留尾部。 */
+/** Maximum log text returned to the model; keep the tail when longer. */
 const MAX_OUTPUT_CHARS = 4_000
 
-/** progress 上报节流，避免刷屏。 */
+/** Throttle progress updates to avoid flooding the UI. */
 const PROGRESS_INTERVAL_MS = 1_000
 
 interface WaitForInput {
@@ -51,14 +55,15 @@ interface WaitForInput {
 }
 
 /**
- * 从 from 偏移读到文件末尾，一次 open/read 完成，最多读 maxBytes 字节。
+ * Read from `from` to EOF in one open/read pass, up to maxBytes.
  *
- * 不用 readFile：构建日志动辄几十 MB，整体读入既慢又占内存。
- * 窗口左边界取 max(from, size - maxBytes)，保证既不早于 from 也不超过容量。
+ * Do not use readFile: build logs are often tens of MB, and reading the whole
+ * file is slow and memory-heavy. The window starts at max(from, size - maxBytes)
+ * so it never starts before `from` and never exceeds the byte budget.
  */
 async function readFrom(path: string, from: number, maxBytes: number): Promise<string> {
   const info = await stat(path)
-  if (!info.isFile()) throw new Error(`${path} 不是普通文件`)
+  if (!info.isFile()) throw new Error(`${path} is not a regular file`)
   if (info.size <= from) return ""
 
   const start = Math.max(from, info.size - maxBytes)
@@ -78,20 +83,20 @@ async function readFrom(path: string, from: number, maxBytes: number): Promise<s
   }
 }
 
-/** 只保留最后 n 行，避免把整个日志尾部丢给模型。 */
+/** Keep only the last n lines so the model does not receive the whole log tail. */
 function tailLines(text: string, lines: number): string {
   const all = text.split("\n")
   if (all.length <= lines) return text
   return all.slice(all.length - lines).join("\n")
 }
 
-/** 超长时保留尾部——日志的结论总在最后。 */
+/** Keep the tail when text is too long - the conclusion is usually at the end. */
 function compact(text: string, limit = MAX_OUTPUT_CHARS): string {
   if (text.length <= limit) return text
-  return `...(省略前 ${text.length - limit} 字符)...\n${text.slice(text.length - limit)}`
+  return `...(omitted ${text.length - limit} chars)...\n${text.slice(text.length - limit)}`
 }
 
-/** 进程是否还活着。EPERM 表示进程存在但不属于当前用户，同样算活着。 */
+/** Whether the process is alive. EPERM means it exists but belongs to another user, so it is alive too. */
 function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0)
@@ -104,23 +109,23 @@ function processAlive(pid: number): boolean {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))
 
 const DESCRIPTION = [
-  "阻塞等待一个条件成立，最多等到 timeout_ms。用来替代 `sleep N; tail ...` 这种前台轮询。",
+  "Block until a condition holds, up to timeout_ms. Use this instead of foreground `sleep N; tail ...` polling.",
   "",
-  "三种用法（可组合，全部满足才返回）：",
-  "  1. 等文件出现：只给 path",
-  "  2. 等日志出现某行：path + pattern（正则）",
-  "  3. 等进程退出：pid",
+  "Three ways to use it (they can be combined; all must hold):",
+  "  1. Wait for a file to appear: pass only path",
+  "  2. Wait for a log line: path + pattern (regular expression)",
+  "  3. Wait for a process to exit: pid",
   "",
-  "条件成立立刻返回，不会傻等到 timeout。超时也会正常返回（输出以 `[wait_for] timed out` 开头，",
-  "并附上进程状态和日志尾部），这时应当先检查进程是否还活着，而不是再调一次 wait_for 重复等待。",
+  "Returns as soon as the condition holds; does not wait for the timeout. A timeout also returns normally (output starts with `[wait_for] timed out`,",
+  "with process state and the log tail attached). When that happens, check whether the process is still alive instead of calling wait_for again immediately.",
   "",
-  "典型场景：",
-  "  - 长任务用 shell 的 background: true 启动并重定向到日志，然后等结束标记：",
+  "Typical cases:",
+  "  - Start a long task with shell's background: true and redirect it to a log, then wait for an end marker:",
   "      path: '/tmp/build.log', pattern: 'BUILD (SUCCESS|FAILURE)'",
-  "  - 等端口起来：path: '/tmp/dev.log', pattern: 'listening on'",
-  "  - 等后台进程结束：pid: 12345",
+  "  - Wait for a port: path: '/tmp/dev.log', pattern: 'listening on'",
+  "  - Wait for a background process to exit: pid: 12345",
   "",
-  "返回内容是命中时的日志尾部（或超时时的日志尾部），不需要再单独 tail。",
+  "The result is the log tail at match time (or timeout), so no separate tail is needed.",
 ].join("\n")
 
 export default {
@@ -136,33 +141,33 @@ export default {
           properties: {
             path: {
               type: "string",
-              description: "要监视的文件路径（绝对路径）。通常是 background shell 重定向生成的日志。",
+              description: "File to watch (absolute path). Usually a log written by a background shell.",
             },
             pattern: {
               type: "string",
               description:
-                "正则表达式。文件内容匹配到它才算条件成立。只监视文件尾部 64KB，不要指望匹配很久以前的内容。需要配合 path 使用。",
+                "Regular expression. The condition holds when the file content matches. Only the last 64 KB is watched, so do not expect very old content. Requires path.",
             },
             pid: {
               type: "number",
-              description: "改为等待这个进程退出。可以同时给 path，这样进程结束和日志匹配都要满足。",
+              description: "Wait for this process to exit instead. Can be combined with path, in which case both the exit and the log match must hold.",
             },
             timeout_ms: {
               type: "number",
-              description: `最长等待毫秒数，默认 ${DEFAULT_TIMEOUT_MS}，上限 ${MAX_TIMEOUT_MS}。`,
+              description: `Maximum wait in milliseconds. Default ${DEFAULT_TIMEOUT_MS}, cap ${MAX_TIMEOUT_MS}.`,
             },
             poll_ms: {
               type: "number",
-              description: `轮询间隔毫秒数，默认 ${DEFAULT_POLL_MS}，最小 ${MIN_POLL_MS}。一般不用改。`,
+              description: `Poll interval in milliseconds. Default ${DEFAULT_POLL_MS}, minimum ${MIN_POLL_MS}. Usually not needed.`,
             },
             tail_lines: {
               type: "number",
-              description: "返回日志的最后多少行，默认 60。",
+              description: "Number of trailing log lines to return. Default 60.",
             },
             must_be_new: {
               type: "boolean",
               description:
-                "true 表示只有调用之后新写入的内容才算数（先记下当前文件大小）。适合日志里已经存在旧匹配的情况。",
+                "When true, only content written after the call starts counts (the current file size is recorded first). Useful when the log already contains an old match.",
             },
           },
           required: [],
@@ -175,10 +180,10 @@ export default {
           const pid = typeof input.pid === "number" ? input.pid : undefined
 
           if (input.pattern && !path) {
-            throw new Error("pattern 需要配合 path 使用")
+            throw new Error("pattern requires path")
           }
           if (!path && pid === undefined) {
-            throw new Error("wait_for 至少需要 path 或 pid 其中之一")
+            throw new Error("wait_for requires at least one of path or pid")
           }
 
           const timeoutMs = Math.min(
@@ -193,11 +198,11 @@ export default {
             try {
               regex = new RegExp(input.pattern, "m")
             } catch (error) {
-              throw new Error(`pattern 不是合法正则: ${(error as Error).message}`)
+              throw new Error(`pattern is not a valid regular expression: ${(error as Error).message}`)
             }
           }
 
-          // must_be_new：记下起始大小，之后只认新增部分
+          // must_be_new: record the starting size and only consider new content
           let baseSize = 0
           if (path && input.must_be_new) {
             try {
@@ -213,7 +218,7 @@ export default {
           let lastChangeAt = startedAt
           let lastProgressAt = 0
 
-          /** 上报进度，避免阻塞期间 UI 完全没反应——那正是 sleep 轮询最糟的体验。 */
+          /** Report progress so the UI does not appear frozen during the wait - the worst part of sleep polling. */
           const reportProgress = async (note: string) => {
             const now = Date.now()
             if (now - lastProgressAt < PROGRESS_INTERVAL_MS) return
@@ -226,7 +231,7 @@ export default {
                 note,
               })
             } catch {
-              // 进度上报失败不影响等待本身
+              // A failed progress update must not affect the wait itself
             }
           }
 
@@ -236,7 +241,7 @@ export default {
               reason,
               hit,
               waited_ms: Date.now() - startedAt,
-              // 最后一次内容变化距今多久 —— 用来区分「慢」和「卡死」
+              // Time since the last content change - distinguishes "slow" from "stuck".
               idle_ms: Date.now() - lastChangeAt,
               ...(path ? { path } : {}),
               ...(pid !== undefined ? { pid } : {}),
@@ -245,7 +250,7 @@ export default {
 
           while (true) {
             if (context?.signal?.aborted) {
-              throw new Error("wait_for 被中止")
+              throw new Error("wait_for aborted")
             }
 
             const problems: string[] = []
@@ -253,16 +258,16 @@ export default {
             let snapshot = ""
             let pidAlive = false
 
-            // 各条件独立判定、独立记录原因，避免一个条件失败就吞掉其他诊断信息
+            // Evaluate each condition independently and record its own reason so one failure does not hide the others.
             if (pid !== undefined) {
               pidAlive = processAlive(pid)
               if (pidAlive) {
                 matched = false
-                problems.push(`pid ${pid} 仍在运行`)
+                problems.push(`pid ${pid} is still running`)
               }
             }
 
-            // 注意：即使 pid 还活着也要读日志，否则超时时拿不到日志尾部
+            // Read the log even when the pid is still alive; otherwise a timeout cannot include the log tail.
             if (path) {
               try {
                 const info = await stat(path)
@@ -275,20 +280,20 @@ export default {
 
                 if (input.must_be_new && info.size <= baseSize) {
                   matched = false
-                  problems.push(`文件尚未增长（当前 ${info.size} 字节，起始 ${baseSize} 字节）`)
+                  problems.push(`file has not grown (current ${info.size} bytes, starting ${baseSize} bytes)`)
                 } else if (regex) {
-                  // must_be_new 时只匹配新增区段，避免命中历史日志；也只读该区段
+                  // With must_be_new, match only the new range and read only that range.
                   const from = input.must_be_new && baseSize > 0 ? baseSize : 0
                   const scoped = await readFrom(path, from, TAIL_BYTES)
                   if (!regex.test(scoped)) {
                     matched = false
-                    problems.push(`日志未匹配 /${input.pattern}/`)
+                    problems.push(`log did not match /${input.pattern}/`)
                   }
                 }
               } catch (error) {
                 if ((error as NodeJS.ErrnoException).code === "ENOENT") {
                   matched = false
-                  problems.push(`文件还不存在: ${path}`)
+                  problems.push(`file does not exist yet: ${path}`)
                 } else {
                   throw error
                 }
@@ -297,32 +302,32 @@ export default {
 
             if (matched) {
               const head = [
-                `[wait_for] 条件成立，等待 ${((Date.now() - startedAt) / 1000).toFixed(3)}s`,
-                pid !== undefined ? `pid: ${pid} 已退出` : "",
+                `[wait_for] condition met after ${((Date.now() - startedAt) / 1000).toFixed(3)}s`,
+                pid !== undefined ? `pid: ${pid} exited` : "",
                 path ? `path: ${path}` : "",
               ]
                 .filter(Boolean)
                 .join(" | ")
-              const body = snapshot ? `${head}\n\n--- 日志尾部 ---\n${compact(snapshot)}` : head
+              const body = snapshot ? `${head}\n\n--- log tail ---\n${compact(snapshot)}` : head
               return buildResult("condition met", true, body)
             }
 
             if (Date.now() >= deadline) {
               const head = [
-                `[wait_for] timed out 等了 ${(timeoutMs / 1000).toFixed(1)}s`,
-                `原因: ${problems.join("；")}`,
-                `最后变化: ${((Date.now() - lastChangeAt) / 1000).toFixed(1)}s 前`,
-                pidAlive ? `pid ${pid} 仍在运行 —— 任务可能只是慢，不是卡死` : "",
-                "下一步建议: 用 ps / lsof 确认进程状态，不要直接再调一次 wait_for 重复等待。",
+                `[wait_for] timed out after ${(timeoutMs / 1000).toFixed(1)}s`,
+                `Reason: ${problems.join("; ")}`,
+                `Last change: ${((Date.now() - lastChangeAt) / 1000).toFixed(1)}s ago`,
+                pidAlive ? `pid ${pid} is still running - the task may simply be slow, not stuck` : "",
+                "Next step: use ps / lsof to check the process; do not call wait_for again immediately.",
               ]
                 .filter(Boolean)
                 .join("\n")
-              const body = snapshot ? `${head}\n\n--- 日志尾部 ---\n${compact(snapshot)}` : head
+              const body = snapshot ? `${head}\n\n--- log tail ---\n${compact(snapshot)}` : head
               return buildResult("timeout", false, body)
             }
 
             await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())))
-            await reportProgress(problems.join("；") || "等待中")
+            await reportProgress(problems.join("; ") || "waiting")
           }
         },
       })
