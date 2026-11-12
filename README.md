@@ -114,6 +114,73 @@ wait_for({ path: "/tmp/app.log", pattern: "ERROR", must_be_new: true })
 
 `path` 和 `pid` 至少要给一个。
 
+## Advanced conditions (`condition`)
+
+`condition` is additive: when present it takes precedence over
+`path`/`pattern`/`pid`/`must_be_new`, and existing calls keep working.
+
+```ts
+wait_for({
+  condition: { type: "file_exists", path: "dist/app.js", stableForMs: 500 },
+  timeout_ms: 120_000,
+  poll_ms: 1_000,
+})
+```
+
+| `type` | Required fields | Optional fields |
+|---|---|---|
+| `file_exists` | `path` | `stableForMs` |
+| `file_absent` | `path` | |
+| `file_changed` | `path` | `since`, `stableForMs` |
+| `file_contains` | `path`, `pattern` | `regex`, `mustBeNew` |
+| `process_exited` | `pid` | |
+| `process_running` | `pid` | |
+| `port_open` | `host`, `port` | |
+| `port_closed` | `host`, `port` | |
+| `http_status` | `url` | `status` (number or array), `headers` |
+| `http_json` | `url`, `jsonPath`, `equals` | `headers` |
+| `http_body_contains` | `url`, `pattern` | `regex`, `headers` |
+
+Examples:
+
+```ts
+// CI run
+wait_for({
+  condition: {
+    type: "http_json",
+    url: "https://api.github.com/repos/org/repo/actions/runs/123",
+    jsonPath: "status",
+    equals: "completed",
+  },
+  timeout_ms: 300_000,
+  poll_ms: 5_000,
+})
+
+// npm registry
+wait_for({
+  condition: {
+    type: "http_status",
+    url: "https://registry.npmjs.org/package/1.2.3",
+    status: 200,
+  },
+  timeout_ms: 120_000,
+})
+
+// service port
+wait_for({
+  condition: { type: "port_open", host: "127.0.0.1", port: 3000 },
+  timeout_ms: 30_000,
+})
+```
+
+`http_json` accepts dot and bracket paths such as `status`,
+`jobs[0].status`, and `data.items[0].state`. HTTP bodies are capped at 256 KB;
+file tail matching is capped at 64 KB, or 256 KB of new content for
+`mustBeNew`.
+
+The condition path returns the same text-style result as the legacy path, with
+extra `metadata.observed`, `metadata.attempts`, and `metadata.waited_ms`.
+
 ## 超时不是失败
 
 超时会**正常返回**而不是抛错，因为「没等到」本身是有信息量的：
