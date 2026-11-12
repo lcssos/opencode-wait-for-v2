@@ -128,17 +128,17 @@ const DESCRIPTION = [
 function conditionResult(result: WaitResult) {
   const seconds = (result.elapsedMs / 1000).toFixed(result.matched ? 3 : 1)
   const lines = result.matched
-    ? [`[wait_for] 条件成立，等待 ${seconds}s`, `condition: ${result.condition}`, `attempts: ${result.attempts}`]
+    ? [`[wait_for] condition met after ${seconds}s`, `condition: ${result.condition}`, `attempts: ${result.attempts}`]
     : result.aborted
-      ? [`[wait_for] aborted 等了 ${seconds}s`, `condition: ${result.condition}`, `attempts: ${result.attempts}`]
+      ? [`[wait_for] aborted after ${seconds}s`, `condition: ${result.condition}`, `attempts: ${result.attempts}`]
       : [
-          `[wait_for] timed out 等了 ${seconds}s`,
+          `[wait_for] timed out after ${seconds}s`,
           `condition: ${result.condition}`,
           `attempts: ${result.attempts}`,
           `last error: ${result.lastError ?? "none"}`,
-          "下一步建议: 先检查观察到的状态，不要直接再调一次 wait_for 重复等待。",
+          "Next step: inspect the observed state; do not call wait_for again immediately.",
         ]
-  if (result.excerpt) lines.push("", "--- 日志尾部 ---", compact(result.excerpt))
+  if (result.excerpt) lines.push("", "--- log tail ---", compact(result.excerpt))
   lines.push(`observed: ${JSON.stringify(result.observed)}`)
   return {
     content: lines.join("\n"),
