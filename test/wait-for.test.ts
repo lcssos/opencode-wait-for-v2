@@ -5,8 +5,8 @@ import { join } from "node:path"
 import plugin from "../index.ts"
 
 /**
- * 把插件的 execute 抠出来直接测。
- * 真实链路是 ctx.tool.transform(editor => editor.add(tool))，这里只关心 execute 的行为。
+ * Extract the plugin's execute function and test it directly.
+ * The real path is ctx.tool.transform(editor => editor.add(tool)); this only exercises execute.
  */
 type Exec = (input: any, context: any) => Promise<{ content: string; metadata: any }>
 
@@ -28,7 +28,7 @@ beforeAll(async () => {
   await plugin.setup(ctx as any)
   exec = captured.execute
 
-  if (!exec) throw new Error("插件没有注册 wait_for 工具")
+  if (!exec) throw new Error("plugin did not register the wait_for tool")
 })
 
 afterAll(async () => {
@@ -38,7 +38,7 @@ afterAll(async () => {
 const noSignal = { signal: new AbortController().signal, progress: async () => {} }
 
 describe("wait_for", () => {
-  test("注册了 wait_for 工具且带 codemode 选项", async () => {
+  test("registers wait_for with the codemode option", async () => {
     let captured: any
     await plugin.setup({
       tool: {
@@ -53,7 +53,7 @@ describe("wait_for", () => {
     expect(captured.input.type).toBe("object")
   })
 
-  test("文件已存在且匹配：立即返回", async () => {
+  test("existing matching file: returns immediately", async () => {
     const p = join(dir, "ready.log")
     await writeFile(p, "step 1\nBUILD SUCCESS\n")
 
@@ -61,14 +61,14 @@ describe("wait_for", () => {
     const r = await exec({ path: p, pattern: "BUILD SUCCESS", timeout_ms: 5000 }, noSignal)
     const elapsed = Date.now() - t0
 
-    expect(r.content).toContain("条件成立")
+    expect(r.content).toContain("condition met")
     expect(r.content).toContain("BUILD SUCCESS")
     expect(r.metadata.hit).toBe(true)
-    // 必须远小于 timeout
+    // Must be far below the timeout
     expect(elapsed).toBeLessThan(1000)
   })
 
-  test("等待后写入：条件成立即返回，不等到 timeout", async () => {
+  test("content written later: returns on match, not at timeout", async () => {
     const p = join(dir, "later.log")
     await writeFile(p, "starting\n")
 
@@ -85,30 +85,30 @@ describe("wait_for", () => {
     expect(elapsed).toBeLessThan(5000)
   })
 
-  test("超时：返回 timed out 并附带日志尾部，而非抛错", async () => {
+  test("timeout: returns timed out with the log tail instead of throwing", async () => {
     const p = join(dir, "never.log")
     await writeFile(p, "starting\nstill going\n")
 
     const r = await exec({ path: p, pattern: "NEVER_APPEARS", timeout_ms: 800, poll_ms: 100 }, noSignal)
 
     expect(r.content).toContain("timed out")
-    expect(r.content).toContain("日志未匹配")
-    // 超时也必须带日志尾部，方便模型判断是慢还是卡死
+    expect(r.content).toContain("log did not match")
+    // A timeout must include the log tail so the model can tell slow from stuck
     expect(r.content).toContain("still going")
     expect(r.metadata.hit).toBe(false)
     expect(r.metadata.reason).toBe("timeout")
   })
 
-  test("文件不存在时超时：报告文件不存在", async () => {
+  test("missing file timeout: reports that the file does not exist", async () => {
     const p = join(dir, "missing.log")
     const r = await exec({ path: p, timeout_ms: 500, poll_ms: 100 }, noSignal)
 
-    expect(r.content).toContain("文件还不存在")
+    expect(r.content).toContain("file does not exist yet")
     expect(r.metadata.hit).toBe(false)
   })
 
-  test("pid 已退出：立即返回", async () => {
-    // 用当前进程之外的必然已退出的 pid 不可靠，改为起一个短命进程
+  test("pid already exited: returns immediately", async () => {
+    // A PID outside this process is not guaranteed to be gone; spawn a short-lived process instead
     const proc = Bun.spawn(["true"])
     const exitCode = await proc.exited
     const pid = proc.pid
@@ -117,38 +117,38 @@ describe("wait_for", () => {
     const t0 = Date.now()
     const r = await exec({ pid, timeout_ms: 3000 }, noSignal)
     expect(r.metadata.hit).toBe(true)
-    expect(r.content).toContain("已退出")
+    expect(r.content).toContain("exited")
     expect(Date.now() - t0).toBeLessThan(1000)
   })
 
-  test("pid 仍存活：超时且提示可能只是慢", async () => {
+  test("pid still alive: times out and suggests it may simply be slow", async () => {
     const proc = Bun.spawn(["sleep", "10"])
     try {
       const r = await exec({ pid: proc.pid, timeout_ms: 600, poll_ms: 100 }, noSignal)
       expect(r.metadata.hit).toBe(false)
-      expect(r.content).toContain("仍在运行")
-      expect(r.content).toContain("可能只是慢")
+      expect(r.content).toContain("still running")
+      expect(r.content).toContain("may simply be slow")
     } finally {
       proc.kill()
     }
   })
 
-  test("pid 活 + 日志匹配：两个条件都满足才返回", async () => {
+  test("pid alive + log match: requires both conditions", async () => {
     const p = join(dir, "both.log")
     const proc = Bun.spawn(["bash", "-c", `sleep 0.3; echo DONE > ${p}; sleep 10`])
     try {
       const t0 = Date.now()
       const r = await exec({ pid: proc.pid, path: p, pattern: "DONE", timeout_ms: 3000, poll_ms: 100 }, noSignal)
-      // 日志已匹配，但进程还活着 → 不能返回，应超时
+      // The log matched but the process is still alive -> must not return; expect a timeout
       expect(r.metadata.hit).toBe(false)
-      expect(r.content).toContain("仍在运行")
+      expect(r.content).toContain("still running")
       expect(Date.now() - t0).toBeGreaterThan(2000)
     } finally {
       proc.kill()
     }
   })
 
-  test("must_be_new：历史匹配不算数", async () => {
+  test("must_be_new: stale matches do not count", async () => {
     const p = join(dir, "stale.log")
     await writeFile(p, "BUILD SUCCESS\n")
 
@@ -157,10 +157,10 @@ describe("wait_for", () => {
       noSignal,
     )
     expect(r.metadata.hit).toBe(false)
-    expect(r.content).toContain("尚未增长")
+    expect(r.content).toContain("has not grown")
   })
 
-  test("must_be_new：新增内容命中", async () => {
+  test("must_be_new: matches new content", async () => {
     const p = join(dir, "fresh.log")
     await writeFile(p, "BUILD SUCCESS (old)\n")
 
@@ -176,7 +176,7 @@ describe("wait_for", () => {
     expect(r.content).toContain("BUILD FAILURE (new)")
   })
 
-  test("大文件只读尾部，命中很快", async () => {
+  test("large file: reads only the tail and matches quickly", async () => {
     const p = join(dir, "big.log")
     const lines: string[] = []
     for (let i = 0; i < 50_000; i++) lines.push(`[INFO] line ${i} lorem ipsum dolor sit amet`)
@@ -188,46 +188,46 @@ describe("wait_for", () => {
     const elapsed = Date.now() - t0
 
     expect(r.metadata.hit).toBe(true)
-    // 输出必须被 tail_lines 截断，不能把整个文件丢给模型
+    // Output must be truncated by tail_lines; never send the whole file to the model
     expect(r.content.split("\n").length).toBeLessThan(15)
     expect(elapsed).toBeLessThan(500)
   })
 
-  test("tail_lines 控制返回行数", async () => {
+  test("tail_lines controls the returned line count", async () => {
     const p = join(dir, "many.log")
     const lines = Array.from({ length: 200 }, (_, i) => `line ${i}`)
     await writeFile(p, lines.join("\n"))
 
     const r = await exec({ path: p, timeout_ms: 2000, tail_lines: 10 }, noSignal)
-    const body = r.content.split("--- 日志尾部 ---\n")[1] ?? ""
+    const body = r.content.split("--- log tail ---\n")[1] ?? ""
     expect(body.trim().split("\n").length).toBe(10)
   })
 
-  test("参数校验：既无 path 也无 pid", async () => {
-    await expect(exec({ timeout_ms: 100 }, noSignal)).rejects.toThrow(/至少需要 path 或 pid/)
+  test("validation: neither path nor pid", async () => {
+    await expect(exec({ timeout_ms: 100 }, noSignal)).rejects.toThrow(/requires at least one of path or pid/)
   })
 
-  test("参数校验：只有 pattern 没有 path", async () => {
-    await expect(exec({ pattern: "x", timeout_ms: 100 }, noSignal)).rejects.toThrow(/pattern 需要配合 path/)
+  test("validation: pattern without path", async () => {
+    await expect(exec({ pattern: "x", timeout_ms: 100 }, noSignal)).rejects.toThrow(/pattern requires path/)
   })
 
-  test("参数校验：非法正则", async () => {
+  test("validation: invalid regular expression", async () => {
     const p = join(dir, "x.log")
     await writeFile(p, "x")
-    await expect(exec({ path: p, pattern: "([unclosed", timeout_ms: 100 }, noSignal)).rejects.toThrow(/不是合法正则/)
+    await expect(exec({ path: p, pattern: "([unclosed", timeout_ms: 100 }, noSignal)).rejects.toThrow(/not a valid regular expression/)
   })
 
-  test("timeout_ms 上限被夹紧到 600s", async () => {
+  test("timeout_ms is capped at 600s", async () => {
     const p = join(dir, "cap.log")
     await writeFile(p, "x")
-    // 上限夹紧后仍然会等，所以用 abort 立刻退出，只验证不抛参数错误
+    // The cap still waits, so abort immediately; this only checks that no parameter error is thrown
     const controller = new AbortController()
     setTimeout(() => controller.abort(), 100)
     const ctx = { signal: controller.signal, progress: async () => {} }
-    await expect(exec({ path: p, pattern: "nope", timeout_ms: 9_999_999 }, ctx)).rejects.toThrow(/中止/)
+    await expect(exec({ path: p, pattern: "nope", timeout_ms: 9_999_999 }, ctx)).rejects.toThrow(/aborted/)
   })
 
-  test("signal 中断：立刻停止等待", async () => {
+  test("signal abort: stops the wait immediately", async () => {
     const p = join(dir, "abort.log")
     await writeFile(p, "x")
     const controller = new AbortController()
@@ -236,11 +236,11 @@ describe("wait_for", () => {
     const t0 = Date.now()
     await expect(
       exec({ path: p, pattern: "nope", timeout_ms: 30000, poll_ms: 50 }, { signal: controller.signal, progress: async () => {} }),
-    ).rejects.toThrow(/中止/)
+    ).rejects.toThrow(/aborted/)
     expect(Date.now() - t0).toBeLessThan(2000)
   })
 
-  test("progress 上报不影响等待结果", async () => {
+  test("progress reporting does not affect the wait result", async () => {
     const p = join(dir, "prog.log")
     await writeFile(p, "x")
     const notes: any[] = []
@@ -256,7 +256,7 @@ describe("wait_for", () => {
     expect(notes[0].status).toBe("waiting")
   })
 
-  test("progress 抛错时等待照常完成", async () => {
+  test("wait completes even when progress throws", async () => {
     const p = join(dir, "prog-err.log")
     await writeFile(p, "done")
     const ctx = {
