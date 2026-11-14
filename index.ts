@@ -1,4 +1,5 @@
 import { open, stat } from "node:fs/promises"
+import { normalizeCondition, runWait, type WaitResult } from "./conditions.ts"
 
 /**
  * opencode-wait-for-v2 —— 给 OpenCode V2 补一个「等新输出」的原语。
@@ -48,6 +49,7 @@ interface WaitForInput {
   poll_ms?: number
   tail_lines?: number
   must_be_new?: boolean
+  condition?: unknown
 }
 
 /**
@@ -123,6 +125,34 @@ const DESCRIPTION = [
   "返回内容是命中时的日志尾部（或超时时的日志尾部），不需要再单独 tail。",
 ].join("\n")
 
+function conditionResult(result: WaitResult) {
+  const seconds = (result.elapsedMs / 1000).toFixed(result.matched ? 3 : 1)
+  const lines = result.matched
+    ? [`[wait_for] condition met after ${seconds}s`, `condition: ${result.condition}`, `attempts: ${result.attempts}`]
+    : result.aborted
+      ? [`[wait_for] aborted after ${seconds}s`, `condition: ${result.condition}`, `attempts: ${result.attempts}`]
+      : [
+          `[wait_for] timed out after ${seconds}s`,
+          `condition: ${result.condition}`,
+          `attempts: ${result.attempts}`,
+          `last error: ${result.lastError ?? "none"}`,
+          "Next step: inspect the observed state; do not call wait_for again immediately.",
+        ]
+  if (result.excerpt) lines.push("", "--- log tail ---", compact(result.excerpt))
+  lines.push(`observed: ${JSON.stringify(result.observed)}`)
+  return {
+    content: lines.join("\n"),
+    metadata: {
+      reason: result.matched ? "condition met" : result.aborted ? "aborted" : "timeout",
+      hit: result.matched,
+      waited_ms: result.elapsedMs,
+      attempts: result.attempts,
+      observed: result.observed,
+      ...(result.excerpt ? { excerpt: result.excerpt } : {}),
+    },
+  }
+}
+
 export default {
   id: "wait-for",
 
@@ -134,6 +164,50 @@ export default {
         input: {
           type: "object",
           properties: {
+            condition: {
+              type: "object",
+              description:
+                "Advanced condition. When set, path/pattern/pid/must_be_new are ignored. Set type, then the fields that type needs.",
+              properties: {
+                type: {
+                  type: "string",
+                  enum: [
+                    "file_exists",
+                    "file_absent",
+                    "file_changed",
+                    "file_contains",
+                    "process_exited",
+                    "process_running",
+                    "port_open",
+                    "port_closed",
+                    "http_status",
+                    "http_json",
+                    "http_body_contains",
+                  ],
+                },
+                path: { type: "string" },
+                pattern: { type: "string" },
+                regex: { type: "boolean" },
+                mustBeNew: { type: "boolean" },
+                since: { type: "number" },
+                stableForMs: { type: "number" },
+                pid: { type: "number" },
+                host: { type: "string" },
+                port: { type: "number" },
+                url: { type: "string" },
+                status: {
+                  anyOf: [{ type: "number" }, { type: "array", items: { type: "number" } }],
+                },
+                headers: {
+                  type: "object",
+                  additionalProperties: { type: "string" },
+                },
+                jsonPath: { type: "string" },
+                equals: {},
+              },
+              required: ["type"],
+              additionalProperties: false,
+            },
             path: {
               type: "string",
               description: "要监视的文件路径（绝对路径）。通常是 background shell 重定向生成的日志。",
@@ -171,6 +245,29 @@ export default {
         options: { codemode: true },
         execute: async (raw: WaitForInput, context: any) => {
           const input = raw ?? {}
+
+          if (input.condition) {
+            const condition = normalizeCondition(input.condition)
+            const result = await runWait(condition, {
+              root: context?.directory ?? process.cwd(),
+              timeoutMs: input.timeout_ms,
+              intervalMs: input.poll_ms,
+              signal: context?.signal,
+              // Keep the upstream plugin's existing behavior: absolute paths are
+              // accepted without the host permission API. The local fork adds
+              // external_directory checks separately.
+              assertExternal: async () => {},
+              progress: context?.progress
+                ? async (event: { status: string }) => {
+                    try {
+                      await context.progress({ status: "waiting", note: event.status })
+                    } catch {}
+                  }
+                : undefined,
+            })
+            return conditionResult(result)
+          }
+
           const path = input.path
           const pid = typeof input.pid === "number" ? input.pid : undefined
 
