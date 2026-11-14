@@ -63,10 +63,10 @@ type EvalState = {
   stable?: { size: number; mtimeMs: number; since: number }
 }
 
-const DEFAULT_TIMEOUT_MS = 60_000
+const DEFAULT_TIMEOUT_MS = 240_000
 const MIN_TIMEOUT_MS = 100
 const MAX_TIMEOUT_MS = 600_000
-const DEFAULT_INTERVAL_MS = 1_000
+const DEFAULT_INTERVAL_MS = 500
 const MIN_INTERVAL_MS = 100
 const MAX_INTERVAL_MS = 30_000
 const TAIL_BYTES = 64 * 1024
@@ -634,14 +634,21 @@ async function evaluate(
       const perAttempt = Math.max(2_000, Math.min(10_000, intervalMs))
       try {
         const response = await fetchOnce(condition.url, condition.headers, options.signal, perAttempt)
-        const expected = condition.status === undefined
-          ? response.status >= 200 && response.status < 300
-          : Array.isArray(condition.status)
-            ? condition.status.includes(response.status)
-            : condition.status === response.status
-        return {
-          matched: expected,
-          observed: { url: condition.url, status: response.status },
+        try {
+          const expected = condition.status === undefined
+            ? response.status >= 200 && response.status < 300
+            : Array.isArray(condition.status)
+              ? condition.status.includes(response.status)
+              : condition.status === response.status
+          return {
+            matched: expected,
+            observed: { url: condition.url, status: response.status },
+          }
+        } finally {
+          // The status is all we need; cancel the body so polling does not hold sockets open.
+          try {
+            await response.body?.cancel()
+          } catch {}
         }
       } catch (error) {
         return {

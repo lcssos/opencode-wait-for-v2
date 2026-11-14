@@ -113,10 +113,16 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 const DESCRIPTION = [
   "Block until a condition holds, up to timeout_ms. Use this instead of foreground `sleep N; tail ...` polling.",
   "",
-  "Three ways to use it (they can be combined; all must hold):",
+  "Four ways to use it:",
   "  1. Wait for a file to appear: pass only path",
   "  2. Wait for a log line: path + pattern (regular expression)",
   "  3. Wait for a process to exit: pid",
+  "  4. Wait for an advanced condition: condition (file, process, port, or HTTP). When set, it takes precedence over 1-3.",
+  "",
+  "Ways 1-3 can be combined; all of them must hold. condition.type is one of: file_exists, file_absent, file_changed,",
+  "file_contains, process_exited, process_running, port_open, port_closed, http_status, http_json, http_body_contains.",
+  "Put the fields next to type, e.g. condition: { type: 'port_open', host: '127.0.0.1', port: 3000 }",
+  "or condition: { type: 'http_status', url: 'https://...', status: 200 }.",
   "",
   "Returns as soon as the condition holds; does not wait for the timeout. A timeout also returns normally (output starts with `[wait_for] timed out`,",
   "with process state and the log tail attached). When that happens, check whether the process is still alive instead of calling wait_for again immediately.",
@@ -126,6 +132,7 @@ const DESCRIPTION = [
   "      path: '/tmp/build.log', pattern: 'BUILD (SUCCESS|FAILURE)'",
   "  - Wait for a port: path: '/tmp/dev.log', pattern: 'listening on'",
   "  - Wait for a background process to exit: pid: 12345",
+  "  - Wait for an HTTP endpoint, port, or CI status: condition: { type: 'port_open', host: '127.0.0.1', port: 3000 }",
   "",
   "The result is the log tail at match time (or timeout), so no separate tail is needed.",
 ].join("\n")
@@ -172,7 +179,7 @@ export default {
             condition: {
               type: "object",
               description:
-                "Advanced condition. When set, path/pattern/pid/must_be_new are ignored. Set type, then the fields that type needs.",
+                "Advanced condition for file, process, port, or HTTP state. When set, path/pattern/pid/must_be_new are ignored. Set type, then the fields that type needs (e.g. path, pid, host+port, url, status, jsonPath+equals).",
               properties: {
                 type: {
                   type: "string",

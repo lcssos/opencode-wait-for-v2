@@ -1,6 +1,6 @@
 # opencode-wait-for-v2
 
-An OpenCode **V2** plugin that gives the agent a `wait_for` tool for **blocking until a log line appears or a process exits**, replacing foreground `sleep N; tail ...` polling.
+An OpenCode **V2** plugin that gives the agent a `wait_for` tool for **blocking until a log line appears, a process exits, or a file/port/HTTP condition holds**, replacing foreground `sleep N; tail ...` polling.
 
 ```ts
 wait_for({ path: "/tmp/build.log", pattern: "BUILD (SUCCESS|FAILURE)", timeout_ms: 600_000 })
@@ -100,6 +100,77 @@ Use `must_be_new: true` to consider only content written **after the call starts
 wait_for({ path: "/tmp/app.log", pattern: "ERROR", must_be_new: true })
 ```
 
+### 5. Wait for a file, port, or HTTP condition
+
+Pass a single `condition` object for anything beyond a log tail or process exit. It is checked immediately, then polled every `poll_ms`.
+
+`condition` **takes precedence**: when it is set, `path`, `pattern`, `pid`, and `must_be_new` are ignored.
+
+| `condition.type` | Required fields | Optional fields | Holds when |
+| --- | --- | --- | --- |
+| `file_exists` | `path` | `stableForMs` | The file exists (and has not changed for `stableForMs`). |
+| `file_absent` | `path` | — | The file does not exist. |
+| `file_changed` | `path` | `since`, `stableForMs` | Size or mtime differs from the first check (`since` is an epoch-ms cutoff), and is stable for `stableForMs`. |
+| `file_contains` | `path`, `pattern` | `regex`, `mustBeNew` | The file tail contains `pattern`. With `mustBeNew`, only content written after the call is searched (latest 256 KB). |
+| `process_exited` | `pid` | — | The process is gone. |
+| `process_running` | `pid` | — | The process is alive. |
+| `port_open` | `host`, `port` | — | A TCP connection succeeds. |
+| `port_closed` | `host`, `port` | — | A TCP connection is refused or times out. |
+| `http_status` | `url` | `status`, `headers` | The response status matches `status` (number or array; default any 2xx). |
+| `http_json` | `url`, `jsonPath`, `equals` | `headers` | The JSON value at `jsonPath` equals `equals` (dot/bracket path). |
+| `http_body_contains` | `url`, `pattern` | `regex`, `headers` | The response body contains `pattern`. |
+
+Notes:
+
+- Relative paths resolve against the session directory; absolute paths are used as-is.
+- File content is read from the tail (64 KB, or up to 256 KB of new bytes with `mustBeNew`). HTTP bodies are capped at 256 KB.
+- `regex: true` treats `pattern` as a regular expression; the default is a literal substring match.
+- HTTP requests follow redirects. Each attempt times out after 2-10 seconds, derived from `poll_ms`.
+- `http_json` paths support dots and brackets, e.g. `status` or `jobs[0].state`.
+- Defaults are the same as the basic modes: `timeout_ms` 240000 (cap 600000), `poll_ms` 500.
+
+```ts
+// CI run finished
+wait_for({
+  condition: {
+    type: "http_json",
+    url: "https://api.github.com/repos/org/repo/actions/runs/123",
+    jsonPath: "status",
+    equals: "completed",
+  },
+  timeout_ms: 300_000,
+  poll_ms: 5_000,
+})
+
+// package is available on the registry
+wait_for({
+  condition: { type: "http_status", url: "https://registry.npmjs.org/pkg/1.2.3", status: 200 },
+  timeout_ms: 120_000,
+})
+
+// local service is listening
+wait_for({
+  condition: { type: "port_open", host: "127.0.0.1", port: 3000 },
+  timeout_ms: 30_000,
+})
+
+// wait for a line written after the call starts
+wait_for({
+  condition: { type: "file_contains", path: "/tmp/deploy.log", pattern: "pod/ready", mustBeNew: true },
+})
+```
+
+A condition timeout is still a normal result: the text starts with `[wait_for] timed out`, and `metadata` carries `hit: false`, `reason: "timeout"`, `attempts`, and the last `observed` state.
+
+```text
+[wait_for] timed out after 120.0s
+condition: HTTP status 200: https://registry.npmjs.org/pkg/1.2.3
+attempts: 61
+last error: fetch failed
+Next step: inspect the observed state; do not call wait_for again immediately.
+observed: {"url":"https://registry.npmjs.org/pkg/1.2.3"}
+```
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
@@ -111,8 +182,9 @@ wait_for({ path: "/tmp/app.log", pattern: "ERROR", must_be_new: true })
 | `poll_ms` | number | `500` | Poll interval; minimum `100`. Usually not needed. |
 | `tail_lines` | number | `60` | Number of log lines returned. |
 | `must_be_new` | boolean | `false` | Only consider content written after the call starts. |
+| `condition` | object | — | Advanced file/process/port/HTTP condition. When set, `path`, `pattern`, `pid`, and `must_be_new` are ignored. See [Advanced conditions](#5-wait-for-a-file-port-or-http-condition). |
 
-At least one of `path` or `pid` is required.
+At least one of `path`, `pid`, or `condition` is required.
 
 ## A timeout is not a failure
 
@@ -206,7 +278,7 @@ The tool declares `options: { codemode: true }`, so it is also available in Code
 ## Development
 
 ```bash
-bun test          # 19 cases
+bun test          # 30 cases
 bun build index.ts --target=node --outfile=/tmp/check.js   # build check
 ```
 
