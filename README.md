@@ -282,6 +282,16 @@ bun test          # 30 cases
 bun build index.ts --target=node --outfile=/tmp/check.js   # build check
 ```
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the project layout, coding conventions, and the release flow.
+
+## Contributors
+
+Thanks to the people who made this project better:
+
+- [@masterjg](https://github.com/masterjg) (Marius Guščius) — the unified `condition` API for `wait_for` ([#1](https://github.com/lcssos/opencode-wait-for-v2/pull/1)) and the English translation of the project ([#2](https://github.com/lcssos/opencode-wait-for-v2/pull/2)).
+
+Contributions of any size are welcome — bug reports, condition types, docs, and translations included.
+
 ## License
 
 MIT
