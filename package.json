@@ -9,6 +9,7 @@
   "files": [
     "index.ts",
     "conditions.ts",
+    "skills",
     "README.md",
     "LICENSE"
   ],
