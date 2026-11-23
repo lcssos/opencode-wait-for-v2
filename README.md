@@ -54,6 +54,22 @@ Confirm it is loaded:
 opencode plugin list
 ```
 
+### Skill
+
+The repository bundles an agent skill at `skills/wait/SKILL.md`. With the
+git-clone install above, symlink it into the global skills directory:
+
+```bash
+ln -s ~/.config/opencode/plugins/opencode-wait-for-v2/skills/wait \
+  ~/.config/opencode/skills/wait
+```
+
+Or point the `skills` list at that directory:
+
+```jsonc
+{ "skills": ["~/.config/opencode/plugins/opencode-wait-for-v2/skills/wait"] }
+```
+
 ## Usage
 
 ### 1. Wait for a build or test run to finish
